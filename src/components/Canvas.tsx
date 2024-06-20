@@ -4,6 +4,9 @@ import { fabric } from 'fabric';
 interface CanvasProps {
   lineWidth: number;
   color: string;
+  gradientColor1: string;
+  gradientColor2: string;
+  useGradient: boolean;
   imageSrcs: string[];
 }
 
@@ -12,15 +15,33 @@ interface ImageItem {
   src: string;
 }
 
-const Canvas: React.FC<CanvasProps> = ({ lineWidth, color, imageSrcs }) => {
+const Canvas: React.FC<CanvasProps> = ({
+  lineWidth,
+  color,
+  gradientColor1,
+  gradientColor2,
+  useGradient,
+  imageSrcs
+}) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fabricCanvasRef = useRef<fabric.Canvas | null>(null);
   const [loadedImages, setLoadedImages] = useState<ImageItem[]>([]);
+  const selectedImageRef = useRef<fabric.Image | null>(null);
+  const imageMapRef = useRef<Map<fabric.Image, { silhouette: fabric.Image, color: string, gradientColor1: string, gradientColor2: string, useGradient: boolean }>>(new Map());
 
   useEffect(() => {
     if (canvasRef.current) {
       fabricCanvasRef.current = new fabric.Canvas(canvasRef.current, {
         preserveObjectStacking: true,
+        selection: false, // Desactiva la selección múltiple
+      });
+
+      fabricCanvasRef.current.on('mouse:down', (options) => {
+        if (options.target && options.target.type === 'image') {
+          selectedImageRef.current = options.target as fabric.Image;
+        } else {
+          selectedImageRef.current = null;
+        }
       });
     }
 
@@ -34,97 +55,197 @@ const Canvas: React.FC<CanvasProps> = ({ lineWidth, color, imageSrcs }) => {
       const newImageSrc = imageSrcs[imageSrcs.length - 1];
       const newImage = { id: `${newImageSrc}-${Date.now()}-${Math.random()}`, src: newImageSrc };
       addImageToCanvas(newImage);
-      setLoadedImages(prev => [...prev, newImage]);
+      setLoadedImages((prev) => [...prev, newImage]);
     }
   }, [imageSrcs]);
+
+  useEffect(() => {
+    if (selectedImageRef.current) {
+      updateSilhouette(selectedImageRef.current, color, gradientColor1, gradientColor2, useGradient);
+      const currentSilhouette = imageMapRef.current.get(selectedImageRef.current)?.silhouette!;
+      imageMapRef.current.set(selectedImageRef.current, {
+        silhouette: currentSilhouette,
+        color: color,
+        gradientColor1: gradientColor1,
+        gradientColor2: gradientColor2,
+        useGradient: useGradient
+      });
+    }
+  }, [color, gradientColor1, gradientColor2, useGradient]);
+
+  const createSilhouetteImage = (
+    imgElement: HTMLImageElement,
+    margin = 20,
+    silhouetteColor = '#ffffff',
+    gradientColor1 = '#ffffff',
+    gradientColor2 = '#ffffff',
+    useGradient = false
+  ): string => {
+    const offscreenCanvas = document.createElement('canvas');
+    offscreenCanvas.width = imgElement.width + margin * 2;
+    offscreenCanvas.height = imgElement.height + margin * 2;
+    const offscreenCtx = offscreenCanvas.getContext('2d');
+
+    if (offscreenCtx) {
+      offscreenCtx.drawImage(imgElement, margin, margin);
+      const imageData = offscreenCtx.getImageData(margin, margin, imgElement.width, imgElement.height);
+      const data = imageData.data;
+
+      offscreenCtx.clearRect(0, 0, offscreenCanvas.width, offscreenCanvas.height);
+
+      if (useGradient) {
+        const gradient = offscreenCtx.createLinearGradient(0, 0, offscreenCanvas.width, 0);
+        gradient.addColorStop(0, gradientColor1);
+        gradient.addColorStop(1, gradientColor2);
+        offscreenCtx.strokeStyle = gradient;
+      } else {
+        offscreenCtx.strokeStyle = silhouetteColor;
+      }
+
+      offscreenCtx.lineWidth = margin * 2;
+
+      const edgePoints: [number, number][] = [];
+      for (let y = 1; y < imgElement.height - 1; y++) {
+        for (let x = 1; x < imgElement.width - 1; x++) {
+          const alpha = data[(y * imgElement.width + x) * 4 + 3];
+          if (alpha > 0 && isEdge(data, imgElement.width, imgElement.height, x, y)) {
+            edgePoints.push([x + margin, y + margin]);
+          }
+        }
+      }
+
+      offscreenCtx.beginPath();
+      edgePoints.forEach(([x, y]) => {
+        offscreenCtx.moveTo(x, y);
+        offscreenCtx.arc(x, y, margin / 2, 0, 2 * Math.PI);
+      });
+      offscreenCtx.stroke();
+    }
+
+    return offscreenCanvas.toDataURL();
+  };
+
+  const isEdge = (data: Uint8ClampedArray, width: number, height: number, x: number, y: number): boolean => {
+    const index = (y * width + x) * 4 + 3;
+    if (data[index] === 0) return false;
+    const neighbors = [
+      [-1, -1], [0, -1], [1, -1],
+      [-1, 0], [1, 0],
+      [-1, 1], [0, 1], [1, 1]
+    ];
+    return neighbors.some(([dx, dy]) => {
+      const ni = (y + dy) * width + (x + dx);
+      return data[ni * 4 + 3] === 0;
+    });
+  };
+
+  const updateSilhouette = (
+    image: fabric.Image,
+    silhouetteColor: string,
+    gradientColor1: string,
+    gradientColor2: string,
+    useGradient: boolean
+  ) => {
+    const fabricCanvas = fabricCanvasRef.current;
+    const imgElement = image.getElement() as HTMLImageElement;
+    const scaleX = image.scaleX || 1;
+    const scaleY = image.scaleY || 1;
+    const margin = 20 / Math.max(scaleX, scaleY);
+    const silhouetteDataURL = createSilhouetteImage(imgElement, margin, silhouetteColor, gradientColor1, gradientColor2, useGradient);
+    fabric.Image.fromURL(silhouetteDataURL, (newSilhouetteImg) => {
+      const silhouetteImg = imageMapRef.current.get(image)?.silhouette;
+      if (silhouetteImg) {
+        silhouetteImg.setElement(newSilhouetteImg.getElement());
+        silhouetteImg.set({
+          left: image.left,
+          top: image.top,
+          angle: image.angle,
+          scaleX: scaleX,
+          scaleY: scaleY,
+          flipX: image.flipX,
+          flipY: image.flipY
+        });
+        fabricCanvas?.renderAll();
+      }
+    });
+  };
 
   const addImageToCanvas = (image: ImageItem) => {
     const fabricCanvas = fabricCanvasRef.current;
 
     if (fabricCanvas) {
-      fabric.Image.fromURL(image.src, (img) => {
-        if (fabricCanvas.width && fabricCanvas.height) {
+      const imgElement = new Image();
+      imgElement.src = image.src;
+      imgElement.crossOrigin = 'anonymous';
+      imgElement.onload = () => {
+        fabric.Image.fromURL(image.src, (img) => {
+          const canvasCenterX = fabricCanvas.getWidth() / 2;
+          const canvasCenterY = fabricCanvas.getHeight() / 2;
+
           img.set({
-            left: fabricCanvas.width / 2 - img.width! / 2,
-            top: fabricCanvas.height / 2 - img.height! / 2,
-            selectable: true, // Hacer que la imagen sea movible y redimensionable
+            left: canvasCenterX,
+            top: canvasCenterY,
+            scaleX: 0.5,
+            scaleY: 0.5,
+            hasBorders: false,
+            hasControls: true,
+            originX: 'center',
+            originY: 'center',
           });
-        }
 
-        // Dibujar la silueta antes de añadir la imagen
-        const imgElement = img.getElement() as HTMLImageElement;
-        const tempCanvas = document.createElement('canvas');
-        tempCanvas.width = imgElement.width;
-        tempCanvas.height = imgElement.height;
-        const tempCtx = tempCanvas.getContext('2d');
+          const silhouetteImg = new fabric.Image(imgElement, {
+            left: canvasCenterX,
+            top: canvasCenterY,
+            scaleX: img.scaleX,
+            scaleY: img.scaleY,
+            originX: 'center',
+            originY: 'center',
+            selectable: false,
+            evented: false,
+            angle: img.angle,
+            flipX: img.flipX,
+            flipY: img.flipY
+          });
 
-        if (tempCtx) {
-          tempCtx.drawImage(imgElement, 0, 0);
-          const imageData = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
-          const data = imageData.data;
+          imageMapRef.current.set(img, {
+            silhouette: silhouetteImg,
+            color: color,
+            gradientColor1: gradientColor1,
+            gradientColor2: gradientColor2,
+            useGradient: useGradient
+          });
 
-          const gradient = tempCtx.createLinearGradient(0, 0, tempCanvas.width, 0);
-          gradient.addColorStop(0, color);
-          gradient.addColorStop(1, color);
-
-          tempCtx.strokeStyle = gradient;
-          tempCtx.lineWidth = lineWidth;
-          tempCtx.beginPath();
-
-          for (let y = 0; y < tempCanvas.height; y++) {
-            for (let x = 0; x < tempCanvas.width; x++) {
-              const alpha = data[(y * tempCanvas.width + x) * 4 + 3];
-              if (alpha > 0 && isEdge(data, tempCanvas.width, tempCanvas.height, x, y)) {
-                tempCtx.moveTo(x, y);
-                tempCtx.arc(x, y, lineWidth / 2, 0, 2 * Math.PI);
-              }
-            }
+          function updateSilhouetteTransform() {
+            silhouetteImg.set({
+              left: img.left,
+              top: img.top,
+              scaleX: img.scaleX,
+              scaleY: img.scaleY,
+              angle: img.angle,
+              flipX: img.flipX,
+              flipY: img.flipY
+            });
+            fabricCanvas?.renderAll();
           }
-          tempCtx.stroke();
 
-          const tempImage = new Image();
-          tempImage.src = tempCanvas.toDataURL();
-          tempImage.onload = () => {
-            const silhouette = new fabric.Image(tempImage, {
-              left: img.left,
-              top: img.top,
-              selectable: false,
-            });
+          img.on('moving', updateSilhouetteTransform);
+          img.on('scaling', updateSilhouetteTransform);
+          img.on('rotating', updateSilhouetteTransform);
+          img.on('flipping', updateSilhouetteTransform);
 
-            // Crear un grupo con la imagen y la silueta
-            const group = new fabric.Group([silhouette, img], {
-              left: img.left,
-              top: img.top,
-              selectable: true,
-            });
+          img.on('modified', () => {
+            const currentData = imageMapRef.current.get(img);
+            if (currentData) {
+              updateSilhouette(img, currentData.color, currentData.gradientColor1, currentData.gradientColor2, currentData.useGradient);
+            }
+          });
 
-            fabricCanvas.add(group);
-            fabricCanvas.renderAll();
-          };
-        }
-      });
+          fabricCanvas.add(silhouetteImg);
+          fabricCanvas.add(img);
+          updateSilhouette(img, color, gradientColor1, gradientColor2, useGradient);
+        });
+      };
     }
-  };
-
-  const isEdge = (data: Uint8ClampedArray, width: number, height: number, x: number, y: number) => {
-    const neighbors = [
-      [x - 1, y - 1], [x, y - 1], [x + 1, y - 1],
-      [x - 1, y],                 [x + 1, y],
-      [x - 1, y + 1], [x, y + 1], [x + 1, y + 1]
-    ];
-
-    for (let i = 0; i < neighbors.length; i++) {
-      const nx = neighbors[i][0];
-      const ny = neighbors[i][1];
-      if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-        const alpha = data[(ny * width + nx) * 4 + 3];
-        if (alpha === 0) {
-          return true;
-        }
-      }
-    }
-
-    return false;
   };
 
   return (
